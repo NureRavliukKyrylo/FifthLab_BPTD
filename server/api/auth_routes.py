@@ -107,6 +107,7 @@ async def google_callback(code: str, response: Response):
         "message": message,
         "code": status_code
     }
+
 @router.post("/refresh")
 async def refresh_token(request: RefreshTokenRequest, response: Response):
     
@@ -166,4 +167,14 @@ async def refresh_token(request: RefreshTokenRequest, response: Response):
         "status_code": 200,
         "access_token": new_access_token,
         "refresh_token": new_refresh_token
+    }
+
+@router.post("/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token")
+    response.delete_cookie("refresh_token")
+
+    return {
+        "message": "Logged out successfully",
+        "status_code": status.HTTP_200_OK
     }
