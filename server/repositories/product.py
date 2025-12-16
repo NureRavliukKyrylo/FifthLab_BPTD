@@ -18,19 +18,19 @@ class ProductRepository:
         cursor = self.collection.find()
         products = []
         async for doc in cursor:
-            doc["id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])
             products.append(Product(**doc))
         return products
 
     async def get_by_id(self, product_id: str) -> Product | None:
         doc = await self.collection.find_one({"_id": ObjectId(product_id)})
         if doc:
-            doc["id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])
             return Product(**doc)
         return None
 
     async def update(self, product_id: str, product: Product) -> Product | None:
-        data = product.model_dump(by_alias=True, exclude={"id"})
+        data = product.model_dump(by_alias=True, exclude={"id"}, exclude_unset=True)
         result = await self.collection.update_one(
             {"_id": ObjectId(product_id)},
             {"$set": data}
@@ -42,3 +42,28 @@ class ProductRepository:
     async def delete(self, product_id: str) -> bool:
         result = await self.collection.delete_one({"_id": ObjectId(product_id)})
         return result.deleted_count > 0
+
+    async def decrement_quantity_atomic(self, product_id: str, qty: int) -> bool:
+        """
+        Atomically decrement product.quantity by qty only if enough stock exists.
+        Prevents negative stock and race-condition oversell.
+        """
+        if qty <= 0:
+            return False
+
+        result = await self.collection.update_one(
+            {"_id": ObjectId(product_id), "quantity": {"$gte": qty}},
+            {"$inc": {"quantity": -qty}}
+        )
+        return result.modified_count == 1
+
+    async def increment_quantity_atomic(self, product_id: str, qty: int) -> bool:
+        """Compensation action (rollback) for failed payment."""
+        if qty <= 0:
+            return False
+
+        result = await self.collection.update_one(
+            {"_id": ObjectId(product_id)},
+            {"$inc": {"quantity": qty}}
+        )
+        return result.modified_count == 1

@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     HOST: str 
     PORT: int
     
+    LIQPAY_PUBLIC_KEY: str = ""
+    LIQPAY_PRIVATE_KEY: str = ""
+    LIQPAY_RESULT_URL: str = ""
+    LIQPAY_SERVER_URL: str = ""
+    LIQPAY_SANDBOX: int = 1  # 1 = sandbox/test
+    
     class Config:
         env_file = ".env"
 
