@@ -1,161 +1,265 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
-from pydantic import BaseModel, Field
-from typing import List, Literal
-from uuid import uuid4
+from fastapi import APIRouter, Depends, HTTPException, Request
+import uuid
 
-from dependencies.auth import get_current_user
+from models.order import Order, OrderStatus
 from models.user import User
-from models.order import Order, OrderItem
+from dependencies.auth import get_current_user
 from repositories.order import OrderRepository
 from repositories.product import ProductRepository
-from services.liqpay import build_init_fields, verify_callback_signature
+from services.liqpay import (
+    build_checkout_payload,
+    build_init_fields,
+    decode_checkout_data,
+    verify_checkout_signature,
+    verify_signature,
+)
+from infrastructure.config import settings
+
+router = APIRouter(prefix="/payments", tags=["payments"])
 
 
-router = APIRouter(prefix="/payments", tags=["Payments"])
+def _status_to_order_status(status: str) -> OrderStatus:
+    s = (status or "").lower().strip()
+    if s in {"success", "sandbox"}:
+        return OrderStatus.SUCCESS
+    if s in {"wait_secure", "processing"}:
+        return OrderStatus.PENDING
+    return OrderStatus.FAILURE
 
 
-class InitItem(BaseModel):
-    product_id: str
-    qty: int = Field(ge=1)
+async def _apply_callback(
+    *,
+    order_id: str,
+    status_raw: str,
+    transaction_id: str,
+    product_repo: ProductRepository,
+    order_repo: OrderRepository,
+) -> dict:
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id_required")
 
+    new_status = _status_to_order_status(status_raw)
 
-class InitPaymentRequest(BaseModel):
-    items: List[InitItem]
-    currency: str = "UAH"
-    description: str = "Purchase"
-    type: Literal["buy", "donate"] = "buy"
+    locked = await order_repo.try_lock_for_callback(order_id, transaction_id)
+    if not locked:
+        existing = await order_repo.get_by_order_id(order_id)
+        if existing:
+            return {"ok": True, "status": str(existing.status)}
+        return {"ok": True}
+
+    try:
+        order = await order_repo.get_by_order_id(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="order_not_found")
+
+        if order.status == OrderStatus.SUCCESS:
+            return {"ok": True, "status": str(order.status)}
+
+        await order_repo.set_status(order_id, new_status, provider="liqpay", transaction_id=transaction_id)
+
+        if new_status == OrderStatus.SUCCESS:
+            for it in order.items:
+                await product_repo.decrement_quantity_atomic(it.product_id, it.qty)
+
+        return {"ok": True, "status": str(new_status)}
+    finally:
+        await order_repo.unlock(order_id)
 
 
 @router.post("/liqpay/init")
-async def init_liqpay_payment(payload: InitPaymentRequest, user: User = Depends(get_current_user)):
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="No items")
+async def init_liqpay_payment(
+    req: dict,
+    product_repo: ProductRepository = Depends(),
+    order_repo: OrderRepository = Depends(),
+    user: User = Depends(get_current_user),
+):
+    items_raw = req.get("items") or []
+    if not isinstance(items_raw, list) or not items_raw:
+        raise HTTPException(status_code=400, detail="items_required")
 
-    product_repo = ProductRepository()
-    order_repo = OrderRepository()
+    items = []
+    amount = 0.0
 
-    items: List[OrderItem] = []
-    total_amount = 0.0
+    for it in items_raw:
+        product_id = str((it or {}).get("product_id") or "").strip()
+        qty_raw = (it or {}).get("qty")
+        if qty_raw is None:
+            qty_raw = (it or {}).get("quantity")
+        try:
+            qty = int(qty_raw or 0)
+        except Exception:
+            qty = 0
 
-    # Server-side price calc (do not trust client)
-    for it in payload.items:
-        product = await product_repo.get_by_id(it.product_id)
+        if not product_id:
+            raise HTTPException(status_code=400, detail="product_id_required")
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="qty_must_be_positive")
+
+        product = await product_repo.get_by_id(product_id)
         if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {it.product_id}")
+            raise HTTPException(status_code=404, detail="product_not_found")
 
-        if product.quantity < it.qty:
-            raise HTTPException(status_code=409, detail=f"Not enough stock for: {product.title}")
+        if int(product.quantity) < qty:
+            raise HTTPException(status_code=400, detail="insufficient_quantity")
 
-        items.append(OrderItem(product_id=it.product_id, qty=it.qty, unit_price=product.price))
-        total_amount += float(product.price) * int(it.qty)
+        items.append(
+            {
+                "product_id": product_id,
+                "qty": qty,
+                "unit_price": float(product.price),
+            }
+        )
+        amount += float(product.price) * qty
 
-    order_id = str(uuid4())
+    currency = str(req.get("currency") or "UAH").upper().strip() or "UAH"
+    description = str(req.get("description") or "Payment for order").strip() or "Payment for order"
+    pay_type = str(req.get("pay_type") or req.get("type") or "card").strip() or "card"
+    sender_phone = str(req.get("sender_phone") or "380000000000").strip() or "380000000000"
 
     order = Order(
-        order_id=order_id,
-        user_id=user.id,  # string id
+        order_id=str(uuid.uuid4()),
+        user_id=str(user.id or "test_user"),
         items=items,
-        amount=round(total_amount, 2),
-        currency=payload.currency.upper(),
-        description=payload.description,
-        status="created",
+        amount=float(amount),
+        currency=currency,
+        description=description,
+        status=OrderStatus.CREATED,
         provider="liqpay",
     )
-    await order_repo.create(order)
+    order = await order_repo.create(order)
 
-    fields = build_init_fields(
+    liqpay_action_legacy = "https://www.liqpay.com/api/pay"
+    liqpay_fields_legacy = build_init_fields(
         order_id=order.order_id,
-        amount=order.amount,
-        currency=order.currency,
-        description=order.description,
-        pay_type=payload.type,
-        language="uk",
+        amount=float(amount),
+        currency=currency,
+        description=description,
+        status=str(OrderStatus.CREATED),
+        transaction_id="T0",
+        sender_phone=sender_phone,
+        pay_type=pay_type,
+    )
+
+    liqpay_checkout = build_checkout_payload(
+        order_id=order.order_id,
+        amount=float(amount),
+        currency=currency,
+        description=description,
     )
 
     return {
         "order_id": order.order_id,
-        "amount": order.amount,
-        "currency": order.currency,
-        "liqpay_action": "https://www.liqpay.com/api/pay",
-        "liqpay_fields": fields,
+        "liqpay": {
+            "action": liqpay_checkout["action"],
+            "data": liqpay_checkout["data"],
+            "signature": liqpay_checkout["signature"],
+        },
+        "liqpay_action": liqpay_action_legacy,
+        "liqpay_fields": liqpay_fields_legacy,
     }
 
 
-@router.post("/liqpay/callback")
-async def liqpay_callback(request: Request):
-    """
-    Public endpoint: LiqPay posts form-urlencoded data here (server_url).
-    Must verify signature and then apply business logic atomically.
-    """
-    form = await request.form()
-    data = dict(form)
-
-    if not verify_callback_signature(data):
-        raise HTTPException(status_code=403, detail="Invalid signature")
-
-    order_id = str(data.get("order_id") or "")
-    status = str(data.get("status") or "")
-    transaction_id = str(data.get("transaction_id") or "")
-
-    order_repo = OrderRepository()
-    product_repo = ProductRepository()
-
-    order = await order_repo.get_by_order_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Fast idempotency check
-    if order.status == "success":
-        return {"ok": True, "ignored": True}
-
-    # Lock to prevent concurrent callbacks from double-decrementing stock
-    locked = await order_repo.try_lock_for_callback(order_id, transaction_id)
-    if not locked:
-        return {"ok": True, "ignored": True}
-
-    try:
-        # Normalize statuses used in PDF (success/failure/wait_secure)
-        if status == "wait_secure":
-            await order_repo.set_status(order_id, "pending", provider="liqpay", transaction_id=transaction_id)
-            return {"ok": True, "status": "pending"}
-
-        if status == "failure":
-            await order_repo.set_status(order_id, "failure", provider="liqpay", transaction_id=transaction_id)
-            return {"ok": True, "status": "failure"}
-
-        if status != "success":
-            # Unknown status -> treat as pending (safe)
-            await order_repo.set_status(order_id, "pending", provider="liqpay", transaction_id=transaction_id)
-            return {"ok": True, "status": "pending"}
-    finally:
-        fresh = await order_repo.get_by_order_id(order_id)
-        if fresh and fresh.status not in ("success", "failure"):
-            await order_repo.unlock(order_id)
-
-    # status == success -> ATOMIC stock decrement per item + rollback on partial failure
-    decremented = []
-    for item in order.items:
-        ok = await product_repo.decrement_quantity_atomic(item.product_id, item.qty)
-        if not ok:
-            # rollback what we already decremented
-            for prev in decremented:
-                await product_repo.increment_quantity_atomic(prev["product_id"], prev["qty"])
-
-            await order_repo.set_status(order_id, "failure", provider="liqpay", transaction_id=transaction_id)
-            raise HTTPException(status_code=409, detail="Out of stock during success callback")
-
-        decremented.append({"product_id": item.product_id, "qty": item.qty})
-
-    await order_repo.set_status(order_id, "success", provider="liqpay", transaction_id=transaction_id)
-    return {"ok": True, "status": "success"}
-
-
 @router.get("/orders/{order_id}")
-async def get_order(order_id: str, user: User = Depends(get_current_user)):
-    order_repo = OrderRepository()
-    order = await order_repo.get_by_order_id(order_id)
+async def get_order_status(
+    order_id: str,
+    order_repo: OrderRepository = Depends(),
+    user: User = Depends(get_current_user),
+):
+    order = await order_repo.get_by_order_id(str(order_id).strip())
     if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return order
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    if user and order.user_id != str(user.id or ""):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    data = order.model_dump(by_alias=True)
+    data["status"] = str(order.status)
+    return data
+
+
+@router.post("/liqpay/callback")
+async def liqpay_callback(
+    request: Request,
+    product_repo: ProductRepository = Depends(),
+    order_repo: OrderRepository = Depends(),
+):
+    form = await request.form()
+
+    if "data" in form and "signature" in form:
+        data = str(form.get("data") or "").strip()
+        signature = str(form.get("signature") or "").strip()
+
+        if not data or not signature:
+            raise HTTPException(status_code=400, detail="data_signature_required")
+
+        if not verify_checkout_signature(data=data, signature=signature):
+            raise HTTPException(status_code=403, detail="invalid_signature")
+
+        payload = decode_checkout_data(data)
+        order_id = str(payload.get("order_id") or "").strip()
+        status_raw = str(payload.get("status") or "").strip()
+        transaction_id = str(payload.get("transaction_id") or payload.get("payment_id") or "").strip() or "T0"
+
+        return await _apply_callback(
+            order_id=order_id,
+            status_raw=status_raw,
+            transaction_id=transaction_id,
+            product_repo=product_repo,
+            order_repo=order_repo,
+        )
+
+    order_id = str(form.get("order_id") or "").strip()
+    status_raw = str(form.get("status") or "").strip()
+    transaction_id = str(form.get("transaction_id") or "").strip() or "T0"
+    signature = str(form.get("signature") or "").strip()
+
+    if not order_id or not signature:
+        raise HTTPException(status_code=400, detail="order_id_signature_required")
+
+    ok = verify_signature(
+        amount=float(form.get("amount") or 0.0),
+        currency=str(form.get("currency") or "UAH"),
+        public_key=str(form.get("public_key") or ""),
+        order_id=order_id,
+        pay_type=str(form.get("type") or "card"),
+        description=str(form.get("description") or ""),
+        status=status_raw,
+        transaction_id=transaction_id,
+        sender_phone=str(form.get("sender_phone") or ""),
+        signature=signature,
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="invalid_signature")
+
+    return await _apply_callback(
+        order_id=order_id,
+        status_raw=status_raw,
+        transaction_id=transaction_id,
+        product_repo=product_repo,
+        order_repo=order_repo,
+    )
+
+
+@router.post("/liqpay/simulate")
+async def liqpay_simulate(
+    req: dict,
+    product_repo: ProductRepository = Depends(),
+    order_repo: OrderRepository = Depends(),
+):
+    if not bool(settings.liqpay_sandbox):
+        raise HTTPException(status_code=403, detail="sandbox_only")
+
+    order_id = str(req.get("order_id") or "").strip()
+    status_raw = str(req.get("status") or "").strip()
+    transaction_id = str(req.get("transaction_id") or "SIM").strip() or "SIM"
+
+    if not order_id or not status_raw:
+        raise HTTPException(status_code=400, detail="order_id_status_required")
+
+    return await _apply_callback(
+        order_id=order_id,
+        status_raw=status_raw,
+        transaction_id=transaction_id,
+        product_repo=product_repo,
+        order_repo=order_repo,
+    )

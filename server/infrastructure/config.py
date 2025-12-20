@@ -23,7 +23,27 @@ class Settings(BaseSettings):
     LIQPAY_PRIVATE_KEY: str = ""
     LIQPAY_RESULT_URL: str = ""
     LIQPAY_SERVER_URL: str = ""
-    LIQPAY_SANDBOX: int = 1  # 1 = sandbox/test
+    LIQPAY_SANDBOX: int = 1
+
+    @property
+    def liqpay_public_key(self) -> str:
+        return self.LIQPAY_PUBLIC_KEY
+
+    @property
+    def liqpay_private_key(self) -> str:
+        return self.LIQPAY_PRIVATE_KEY
+
+    @property
+    def liqpay_result_url(self) -> str:
+        return self.LIQPAY_RESULT_URL
+
+    @property
+    def liqpay_server_url(self) -> str:
+        return self.LIQPAY_SERVER_URL
+
+    @property
+    def liqpay_sandbox(self) -> bool:
+        return bool(int(self.LIQPAY_SANDBOX or 0))
     
     class Config:
         env_file = ".env"

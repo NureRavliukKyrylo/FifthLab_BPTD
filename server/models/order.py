@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional, Literal
+from enum import StrEnum
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
-OrderStatus = Literal["created", "pending", "success", "failure"]
+class OrderStatus(StrEnum):
+    CREATED = "created"
+    PENDING = "pending"
+    SUCCESS = "success"
+    FAILURE = "failure"
 
 
 class OrderItem(BaseModel):
-    """A single purchasable line item."""
     product_id: str
     qty: int = Field(ge=1)
     unit_price: float = Field(ge=0)
@@ -28,10 +32,9 @@ class Order(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     description: str
 
-    status: OrderStatus = "created"
+    status: OrderStatus = OrderStatus.CREATED
     processing: bool = False
 
-    # Filled by payment callback later
     provider: Optional[str] = None
     transaction_id: Optional[str] = None
 

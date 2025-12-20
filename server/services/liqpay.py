@@ -1,13 +1,17 @@
 import base64
 import hashlib
-from typing import Dict, Any, Optional
+import hmac
+import json
+from typing import Any
 
 from infrastructure.config import settings
 
+LIQPAY_CHECKOUT_ACTION = "https://www.liqpay.ua/api/3/checkout"
 
-def _sha1_b64(value: str) -> str:
-    digest = hashlib.sha1(value.encode("utf-8")).digest()
-    return base64.b64encode(digest).decode("utf-8")
+
+def _sha1_b64(s: str) -> str:
+    digest = hashlib.sha1(s.encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
 
 
 def build_init_fields(
@@ -16,75 +20,107 @@ def build_init_fields(
     amount: float,
     currency: str,
     description: str,
-    pay_type: str = "buy",
-    language: str = "uk",
-) -> Dict[str, Any]:
-    """
-    Builds LiqPay form fields following the lab PDF formula (concatenation-based signature).
-    """
-    public_key = settings.LIQPAY_PUBLIC_KEY
-    private_key = settings.LIQPAY_PRIVATE_KEY
+    status: str,
+    transaction_id: str,
+    sender_phone: str,
+    pay_type: str,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "public_key": settings.liqpay_public_key,
+        "amount": float(amount),
+        "currency": currency.upper(),
+        "description": description,
+        "type": pay_type,
+        "order_id": order_id,
+        "status": status,
+        "transaction_id": transaction_id,
+        "sender_phone": sender_phone,
+        "server_url": settings.liqpay_server_url,
+        "result_url": settings.liqpay_result_url,
+        "sandbox": 1 if settings.liqpay_sandbox else 0,
+    }
 
-    result_url = settings.LIQPAY_RESULT_URL
-    server_url = settings.LIQPAY_SERVER_URL
+    signature_base = (
+        f"{settings.liqpay_private_key}"
+        f"{fields['amount']}"
+        f"{fields['currency']}"
+        f"{fields['public_key']}"
+        f"{fields['order_id']}"
+        f"{fields['type']}"
+        f"{fields['description']}"
+        f"{fields['status']}"
+        f"{fields['transaction_id']}"
+        f"{fields['sender_phone']}"
+    )
+    fields["signature"] = _sha1_b64(signature_base)
+    return fields
 
-    # Signature formula from methodical:
-    # base64( sha1(private_key + amount + currency + public_key + order_id + type + description + result_url + server_url) )
-    signature_str = (
-        f"{private_key}"
-        f"{amount}"
-        f"{currency}"
+
+def verify_signature(
+    *,
+    amount: float,
+    currency: str,
+    public_key: str,
+    order_id: str,
+    pay_type: str,
+    description: str,
+    status: str,
+    transaction_id: str,
+    sender_phone: str,
+    signature: str,
+) -> bool:
+    signature_base = (
+        f"{settings.liqpay_private_key}"
+        f"{float(amount)}"
+        f"{currency.upper()}"
         f"{public_key}"
         f"{order_id}"
         f"{pay_type}"
         f"{description}"
-        f"{result_url}"
-        f"{server_url}"
+        f"{status}"
+        f"{transaction_id}"
+        f"{sender_phone}"
     )
-    signature = _sha1_b64(signature_str)
+    expected = _sha1_b64(signature_base)
+    return hmac.compare_digest(expected, signature)
 
-    fields: Dict[str, Any] = {
-        "public_key": public_key,
-        "amount": amount,
-        "currency": currency,
+
+def build_checkout_payload(
+    *,
+    order_id: str,
+    amount: float,
+    currency: str,
+    description: str,
+) -> dict[str, str]:
+    payload: dict[str, Any] = {
+        "public_key": settings.liqpay_public_key,
+        "version": "3",
+        "action": "pay",
+        "amount": f"{float(amount):.2f}",
+        "currency": currency.upper(),
         "description": description,
         "order_id": order_id,
-        "type": pay_type,
-        "language": language,
-        "result_url": result_url,
-        "server_url": server_url,
-        "signature": signature,
+        "result_url": settings.liqpay_result_url,
+        "server_url": settings.liqpay_server_url,
     }
 
-    # Sandbox/test mode
-    if int(settings.LIQPAY_SANDBOX or 0) == 1:
-        fields["sandbox"] = 1
+    if settings.liqpay_sandbox:
+        payload["sandbox"] = 1
 
-    return fields
+    data = base64.b64encode(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    signature = _sha1_b64(f"{settings.liqpay_private_key}{data}{settings.liqpay_private_key}")
+
+    return {"action": LIQPAY_CHECKOUT_ACTION, "data": data, "signature": signature}
 
 
-def verify_callback_signature(form: Dict[str, Any]) -> bool:
-    """
-    Verifies callback signature using methodical formula:
-    base64( sha1(private_key + amount + currency + public_key + order_id + type + description + status + transaction_id + sender_phone) )
-    """
-    public_key = form.get("public_key") or ""
-    if public_key != settings.LIQPAY_PUBLIC_KEY:
-        return False
+def verify_checkout_signature(*, data: str, signature: str) -> bool:
+    expected = _sha1_b64(f"{settings.liqpay_private_key}{data}{settings.liqpay_private_key}")
+    return hmac.compare_digest(expected, signature)
 
-    private_key = settings.LIQPAY_PRIVATE_KEY
 
-    amount = str(form.get("amount") or "")
-    currency = str(form.get("currency") or "")
-    order_id = str(form.get("order_id") or "")
-    pay_type = str(form.get("type") or "")
-    description = str(form.get("description") or "")
-    status = str(form.get("status") or "")
-    transaction_id = str(form.get("transaction_id") or "")
-    sender_phone = str(form.get("sender_phone") or "")
-
-    expected = _sha1_b64(
-        f"{private_key}{amount}{currency}{public_key}{order_id}{pay_type}{description}{status}{transaction_id}{sender_phone}"
-    )
-    received = str(form.get("signature") or "")
-    return received == expected
+def decode_checkout_data(data: str) -> dict[str, Any]:
+    raw = base64.b64decode(data.encode("ascii"))
+    return json.loads(raw.decode("utf-8"))
