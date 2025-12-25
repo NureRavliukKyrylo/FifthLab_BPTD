@@ -21,13 +21,23 @@ const api = axios.create({
 });
 
 type MeResponse =
-  | { success: true; data: { id: string; email: string; name: string; picture?: string | null; email_verified: boolean } }
+  | {
+      success: true;
+      data: {
+        id: string;
+        email: string;
+        name: string;
+        picture?: string | null;
+        email_verified: boolean;
+      };
+    }
   | { success: false; error: string };
 
 function safeReturnTo(v: string | null | undefined): string {
   const s = String(v || "").trim();
   if (!s) return "/products";
-  if (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("//")) return "/products";
+  if (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("//"))
+    return "/products";
   if (!s.startsWith("/")) return `/${s}`;
   return s;
 }
@@ -41,8 +51,14 @@ export function LoginPage() {
   const [user, setUser] = useState<MeResponse | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const isAuthed = useMemo(() => Boolean(user && "success" in user && user.success), [user]);
-  const me = useMemo(() => (isAuthed ? (user as any).data : null), [isAuthed, user]);
+  const isAuthed = useMemo(
+    () => Boolean(user && "success" in user && user.success),
+    [user]
+  );
+  const me = useMemo(
+    () => (isAuthed ? (user as any).data : null),
+    [isAuthed, user]
+  );
 
   const returnTo = useMemo(() => {
     const qp = safeReturnTo(searchParams.get("return_to"));
@@ -80,7 +96,9 @@ export function LoginPage() {
 
   const loginWithGoogle = () => {
     const rt = safeReturnTo(returnTo);
-    window.location.href = `http://localhost:8000/auth/google?return_to=${encodeURIComponent(rt)}`;
+    window.location.href = `http://localhost:8000/auth/google?return_to=${encodeURIComponent(
+      rt
+    )}`;
   };
 
   const logout = async () => {
@@ -108,26 +126,43 @@ export function LoginPage() {
           </div>
 
           <div className="ps-topRight">
-            <Link className="ps-topBtn ps-topBtnSoft" to="/products" aria-label="Catalog">
+            <Link
+              className="ps-topBtn ps-topBtnSoft"
+              to="/products"
+              aria-label="Catalog"
+            >
               <FiPackage size={18} />
               <span>Catalog</span>
             </Link>
 
-            <Link className="ps-topBtn ps-topBtnSoft" to="/cart" aria-label="Cart">
+            <Link
+              className="ps-topBtn ps-topBtnSoft"
+              to="/cart"
+              aria-label="Cart"
+            >
               <FiShoppingCart size={18} />
               <span>Cart</span>
               <span className="ps-count">{cartCount}</span>
             </Link>
 
             {!isAuthed ? (
-              <button className="ps-topBtn ps-topBtnPrimary" type="button" onClick={loginWithGoogle} disabled={loading}>
+              <button
+                className="ps-topBtn ps-topBtnPrimary"
+                type="button"
+                onClick={loginWithGoogle}
+                disabled={loading}
+              >
                 <FiLogIn size={18} />
                 <span>Sign in</span>
               </button>
             ) : (
               <Link className="lp-topAvatar" to="/login" aria-label="Profile">
                 {String(me?.picture || "").trim() ? (
-                  <img className="lp-topAvatarImg" src={me.picture as string} alt={me?.name || "Profile"} />
+                  <img
+                    className="lp-topAvatarImg"
+                    src={me.picture as string}
+                    alt={me?.name || "Profile"}
+                  />
                 ) : (
                   <span className="lp-topAvatarPh">
                     <FiUser size={16} />
@@ -146,7 +181,13 @@ export function LoginPage() {
                 <span>{isAuthed ? "Account" : "Sign in"}</span>
               </div>
 
-              <button className="lp-ghost" type="button" onClick={checkAuth} disabled={loading} aria-label="Refresh session">
+              <button
+                className="lp-ghost"
+                type="button"
+                onClick={checkAuth}
+                disabled={loading}
+                aria-label="Refresh session"
+              >
                 <FiRefreshCcw size={18} />
               </button>
             </div>
@@ -165,12 +206,18 @@ export function LoginPage() {
                   <FiAlertTriangle size={18} />
                   <div className="lp-stateText">
                     <div className="lp-stateTitle">Not authenticated</div>
-                    <div className="lp-stateDesc">Continue with Google to view your profile and checkout.</div>
+                    <div className="lp-stateDesc">
+                      Continue with Google to view your profile and checkout.
+                    </div>
                   </div>
                 </div>
 
                 <div className="lp-actions">
-                  <button className="lp-btn lp-btnPrimary" type="button" onClick={loginWithGoogle}>
+                  <button
+                    className="lp-btn lp-btnPrimary"
+                    type="button"
+                    onClick={loginWithGoogle}
+                  >
                     <FiLogIn size={18} />
                     <span>Continue with Google</span>
                   </button>
@@ -188,7 +235,11 @@ export function LoginPage() {
                 <div className="lp-profile">
                   <div className="lp-avatar">
                     {String(me.picture || "").trim() ? (
-                      <img className="lp-avatarImg" src={me.picture as string} alt={me.name} />
+                      <img
+                        className="lp-avatarImg"
+                        src={me.picture as string}
+                        alt={me.name}
+                      />
                     ) : (
                       <div className="lp-avatarPh">
                         <FiUser size={18} />
@@ -201,9 +252,20 @@ export function LoginPage() {
                     <div className="lp-profEmail">{me.email}</div>
 
                     <div className="lp-profBadges">
-                      <span className="lp-pill" data-kind={me.email_verified ? "ok" : "warn"}>
-                        {me.email_verified ? <FiCheckCircle size={16} /> : <FiAlertTriangle size={16} />}
-                        <span>{me.email_verified ? "Email verified" : "Email not verified"}</span>
+                      <span
+                        className="lp-pill"
+                        data-kind={me.email_verified ? "ok" : "warn"}
+                      >
+                        {me.email_verified ? (
+                          <FiCheckCircle size={16} />
+                        ) : (
+                          <FiAlertTriangle size={16} />
+                        )}
+                        <span>
+                          {me.email_verified
+                            ? "Email verified"
+                            : "Email not verified"}
+                        </span>
                       </span>
                     </div>
                   </div>
@@ -220,7 +282,11 @@ export function LoginPage() {
                     <span>Continue shopping</span>
                   </Link>
 
-                  <button className="lp-btn lp-btnDanger" type="button" onClick={logout}>
+                  <button
+                    className="lp-btn lp-btnDanger"
+                    type="button"
+                    onClick={logout}
+                  >
                     <FiLogOut size={18} />
                     <span>Sign out</span>
                   </button>
